@@ -8,6 +8,15 @@ android {
     namespace = "com.bluepurple.audioplayer"
     compileSdk = 36
 
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a")
+            isUniversalApk = false
+        }
+    }
+
     defaultConfig {
         applicationId = "com.bluepurple.audioplayer"
         minSdk = 24

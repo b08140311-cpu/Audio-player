@@ -24,14 +24,15 @@ jobs:
         run: gradle --no-daemon assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: audio-player-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: audio-player-apks
+          path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-      - name: Publish direct APK download
+      - name: Publish direct APK downloads
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "android-${GITHUB_RUN_NUMBER}" app/build/outputs/apk/debug/app-debug.apk \
+          gh release create "android-${GITHUB_RUN_NUMBER}" app/build/outputs/apk/debug/*.apk \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Audio Player APK ${GITHUB_RUN_NUMBER}" \
-            --notes "Installable Android debug APK."
+            --notes "Installable Android debug APKs. Choose the APK matching your phone architecture."
+

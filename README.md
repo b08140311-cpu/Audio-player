@@ -4,7 +4,7 @@ An Android edition of the Blue Purple music player. It scans local audio, reads 
 
 ## Build the APK
 
-Pushes to `main` build a debug APK and attach it to a GitHub Release. Download `app-debug.apk` from the latest release. The APK is a debug build intended for personal installation.
+Pushes to `main` build separate debug APKs for ARM64 and 32-bit ARM devices and attach them to a GitHub Release. Most current phones should use `app-arm64-v8a-debug.apk`; older 32-bit devices should use `app-armeabi-v7a-debug.apk`.
 
 The app asks for audio access when opened. Audio files stay on the device. Downloaded files are saved in Music/Audio Player by default, or in a folder you choose.
 
