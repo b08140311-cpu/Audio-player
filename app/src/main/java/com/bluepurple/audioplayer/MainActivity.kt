@@ -186,7 +186,7 @@ private fun AudioPlayerApp() {
                         addOption("--no-mtime")
                         addOption("-o", File(taskDir, "%(title).150B-%(id)s.%(ext)s").absolutePath)
                     }
-                    YoutubeDL.getInstance().execute(request) { progress, eta ->
+                    YoutubeDL.getInstance().execute(request) { progress, eta, _ ->
                         scope.launch {
                             downloadProgress = progress.toInt().coerceIn(0, 100)
                             downloadStatus = if (eta > 0) "Downloading · ${eta}s left" else "Downloading MP3…"
