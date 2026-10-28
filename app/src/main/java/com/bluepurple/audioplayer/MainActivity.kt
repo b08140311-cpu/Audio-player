@@ -1,6 +1,7 @@
 package com.bluepurple.audioplayer
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.ContentUris
 import android.content.Context
 import android.content.pm.PackageManager
@@ -10,6 +11,7 @@ import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.MediaStore
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -18,12 +20,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
@@ -47,6 +50,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
@@ -55,6 +59,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.yausername.ffmpeg.FFmpeg
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.util.Locale
 
 private data class Song(
@@ -79,6 +89,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         window.statusBarColor = android.graphics.Color.TRANSPARENT
         window.navigationBarColor = android.graphics.Color.TRANSPARENT
+        runCatching { YoutubeDL.getInstance().init(this); FFmpeg.getInstance().init(this) }
         setContent { AudioPlayerApp() }
     }
 }
@@ -108,6 +119,16 @@ private fun AudioPlayerApp() {
     var playlistDialog by remember { mutableStateOf(false) }
     var playlistName by remember { mutableStateOf("") }
     var expandedPlaylist by remember { mutableStateOf("") }
+    var downloadUrl by remember { mutableStateOf("") }
+    var downloadProgress by remember { mutableIntStateOf(0) }
+    var downloadStatus by remember { mutableStateOf("") }
+    var downloading by remember { mutableStateOf(false) }
+    var downloadRetry by remember { mutableIntStateOf(0) }
+    var savedFolderUri by remember { mutableStateOf(prefs.getString("download_folder", null)?.let(Uri::parse)) }
+    var savedFolderName by remember { mutableStateOf(prefs.getString("download_folder_name", null) ?: "Music / Audio Player") }
+    var completedDownload by remember { mutableStateOf<Song?>(null) }
+    var downloadedPlaylistUri by remember { mutableStateOf<String?>(null) }
+    var downloadedSongs by remember { mutableStateOf<List<Song>>(emptyList()) }
     val palette = palettes[themeIndex]
     val permissionName = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
 
@@ -125,6 +146,73 @@ private fun AudioPlayerApp() {
     }
     LaunchedEffect(volume) { player.volume = volume }
     DisposableEffect(player) { onDispose { player.release() } }
+
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) }
+            savedFolderUri = uri
+            savedFolderName = DocumentFile.fromTreeUri(context, uri)?.name ?: "Selected folder"
+            prefs.edit().putString("download_folder", uri.toString()).putString("download_folder_name", savedFolderName).apply()
+        }
+    }
+    val writePermissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted) downloadRetry++ else downloadStatus = "Storage permission is needed to save the MP3."
+    }
+
+    fun startDownload() {
+        val link = downloadUrl.trim()
+        if (!isSupportedMediaUrl(link)) { downloadStatus = "Paste a YouTube or SoundCloud link."; return }
+        if (downloading) return
+        if (Build.VERSION.SDK_INT < 29 && savedFolderUri == null && !audioWritePermission(context)) {
+            writePermissionRequest.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            return
+        }
+        downloading = true
+        downloadProgress = 0
+        downloadStatus = "Preparing download…"
+        scope.launch {
+            try {
+                val song = withContext(Dispatchers.IO) {
+                    val taskDir = File(context.cacheDir, "downloads/${System.currentTimeMillis()}").apply { mkdirs() }
+                    val before = taskDir.listFiles()?.toSet().orEmpty()
+                    val request = YoutubeDLRequest(link).apply {
+                        addOption("--no-playlist")
+                        addOption("--extract-audio")
+                        addOption("--audio-format", "mp3")
+                        addOption("--audio-quality", "0")
+                        addOption("--embed-thumbnail")
+                        addOption("--convert-thumbnails", "jpg")
+                        addOption("--embed-metadata")
+                        addOption("--no-mtime")
+                        addOption("-o", File(taskDir, "%(title).150B-%(id)s.%(ext)s").absolutePath)
+                    }
+                    YoutubeDL.getInstance().execute(request) { progress, eta ->
+                        scope.launch {
+                            downloadProgress = progress.toInt().coerceIn(0, 100)
+                            downloadStatus = if (eta > 0) "Downloading · ${eta}s left" else "Downloading MP3…"
+                        }
+                    }
+                    val mp3 = taskDir.listFiles()?.filter { it !in before && it.extension.equals("mp3", true) }?.maxByOrNull { it.lastModified() }
+                        ?: throw IllegalStateException("The MP3 file was not created. Try another link or update the download engine.")
+                    val uri = saveDownloadedAudio(context, mp3, savedFolderUri)
+                    val meta = readAudioMetadata(mp3)
+                    Song(uri, meta.title.ifBlank { mp3.nameWithoutExtension }, meta.artist, meta.album, savedFolderName, meta.cover)
+                }
+                val refreshed = withContext(Dispatchers.IO) { scanSongs(context) }
+                songs = if (refreshed.any { it.uri == song.uri }) refreshed else refreshed + song
+                downloadedSongs = listOf(song) + downloadedSongs.filterNot { it.uri == song.uri }
+                completedDownload = song
+                downloadProgress = 100
+                downloadStatus = if (song.cover != null) "Downloaded · cover art embedded and checked" else "Downloaded · no cover art was provided by the source"
+                downloadUrl = ""
+            } catch (error: Exception) {
+                downloadStatus = error.message?.lineSequence()?.firstOrNull()?.take(130) ?: "Download failed. Check the link and try again."
+            } finally {
+                downloading = false
+            }
+        }
+    }
+    LaunchedEffect(downloadRetry) { if (downloadRetry > 0) { downloadRetry = 0; startDownload() } }
 
     fun play(items: List<Song>, start: Int = 0) {
         if (items.isEmpty()) return
@@ -147,8 +235,8 @@ private fun AudioPlayerApp() {
         Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 18.dp)) {
             Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Music", color = palette.ink, fontSize = 29.sp, fontWeight = FontWeight.ExtraBold)
-                    Text(if (permission) "${songs.size} tracks" else "Audio player", color = palette.muted, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                    Text("Melody", color = palette.ink, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+                    Text(if (permission) "${songs.size} tracks · ${page.lowercase()}" else "Your music, your way", color = palette.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 }
                 TextButton(onClick = { themeOpen = !themeOpen }, colors = ButtonDefaults.textButtonColors(contentColor = palette.ink)) { Text("◉", fontSize = 25.sp) }
                 TextButton(onClick = { if (permission) scope.launch { songs = scanSongs(context) } else permissionRequest.launch(permissionName) }, colors = ButtonDefaults.textButtonColors(contentColor = palette.ink)) { Text("Scan", fontWeight = FontWeight.Bold) }
@@ -162,7 +250,7 @@ private fun AudioPlayerApp() {
                     }
                 }
             }
-            if (!permission) {
+            if (!permission && page != "Download") {
                 Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
                     Text("♫", color = palette.ink, fontSize = 54.sp)
                     Text("Choose music access", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
@@ -183,6 +271,8 @@ private fun AudioPlayerApp() {
                     onPlay = { names -> val items = filtered.filter { it.folder.ifBlank { "Music" } in names }; play(items) })
                 "Library" -> LibraryPage(filtered, groupKind, palette,
                     onKind = { groupKind = it }, onPlay = { items -> play(items) })
+                "Download" -> DownloadPage(downloadUrl, { downloadUrl = it }, downloading, downloadProgress, downloadStatus, savedFolderName, downloadedSongs,
+                    onChooseFolder = { folderPicker.launch(null) }, onDownload = { startDownload() }, onPlay = { play(listOf(it)) }, palette = palette)
                 else -> PlaylistPage(playlists, filtered, expandedPlaylist, palette,
                     onCreate = { playlistDialog = true },
                     onPlay = { list -> play(list.uris.mapNotNull { uri -> songs.find { it.uri.toString() == uri } }) },
@@ -190,22 +280,40 @@ private fun AudioPlayerApp() {
                     onRemove = { list, uri -> playlists = playlists.map { if (it.name == list.name) it.copy(uris = it.uris - uri) else it }; savePlaylists(prefs, playlists) },
                     onExpand = { expandedPlaylist = if (expandedPlaylist == it) "" else it })
             }
-            Row(Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 8.dp).clip(RoundedCornerShape(18.dp)).background(Color.Black.copy(alpha = if (palette.dark) .23f else .10f)).padding(4.dp), horizontalArrangement = Arrangement.SpaceEvenly) {
-                listOf("Player" to "♫", "Folders" to "▱", "Library" to "◫", "Playlists" to "☷").forEach { (name, icon) ->
-                    TextButton(onClick = { page = name }, colors = ButtonDefaults.textButtonColors(contentColor = palette.ink)) {
-                        Text("$icon  $name", fontWeight = if (page == name) FontWeight.ExtraBold else FontWeight.SemiBold, fontSize = 13.sp)
+            Row(Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 7.dp).clip(RoundedCornerShape(20.dp)).background(Color.Black.copy(alpha = if (palette.dark) .28f else .13f)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
+                listOf("Player" to "♫", "Folders" to "▤", "Library" to "◫", "Download" to "↓", "Playlists" to "☷").forEach { (name, icon) ->
+                    Column(Modifier.weight(1f).clip(RoundedCornerShape(15.dp)).background(if (page == name) palette.accent.copy(alpha = if (palette.dark) .35f else .25f) else Color.Transparent).clickable { page = name }.padding(vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+                        Text(icon, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Text(name, color = if (page == name) palette.ink else palette.muted, fontSize = 10.sp, fontWeight = if (page == name) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
                     }
                 }
             }
         }
     }
     if (playlistDialog) AlertDialog(
-        onDismissRequest = { playlistDialog = false },
+        onDismissRequest = { playlistDialog = false; downloadedPlaylistUri = null },
         title = { Text("New playlist", fontWeight = FontWeight.Bold) },
         text = { OutlinedTextField(playlistName, { playlistName = it }, singleLine = true, label = { Text("Name") }) },
-        confirmButton = { TextButton(onClick = { val name = playlistName.trim(); if (name.isNotEmpty() && playlists.none { it.name == name }) { playlists = playlists + Playlist(name, emptyList()); savePlaylists(prefs, playlists) }; playlistName = ""; playlistDialog = false }) { Text("Create") } },
-        dismissButton = { TextButton(onClick = { playlistDialog = false }) { Text("Cancel") } }
+        confirmButton = { TextButton(onClick = { val name = playlistName.trim(); if (name.isNotEmpty() && playlists.none { it.name == name }) { val uri = downloadedPlaylistUri; val uris = uri?.let(::listOf) ?: emptyList(); playlists = playlists + Playlist(name, uris); savePlaylists(prefs, playlists) }; downloadedPlaylistUri = null; playlistName = ""; playlistDialog = false }) { Text("Create") } },
+        dismissButton = { TextButton(onClick = { playlistDialog = false; downloadedPlaylistUri = null }) { Text("Cancel") } }
     )
+    completedDownload?.let { song ->
+        AlertDialog(
+            onDismissRequest = { completedDownload = null },
+            title = { Text("Add to a playlist?", fontWeight = FontWeight.Bold) },
+            text = {
+                Column {
+                    Text(song.title, color = palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(8.dp))
+                    if (playlists.isEmpty()) Text("Create a playlist to add this song.", color = palette.muted)
+                    playlists.forEach { list -> TextButton(onClick = { playlists = playlists.map { if (it.name == list.name && song.uri.toString() !in it.uris) it.copy(uris = it.uris + song.uri.toString()) else it }; savePlaylists(prefs, playlists); completedDownload = null }) { Text("＋  ${list.name}", color = palette.ink) } }
+                    TextButton(onClick = { downloadedPlaylistUri = song.uri.toString(); playlistName = ""; playlistDialog = true; completedDownload = null }) { Text("Create playlist", color = palette.accent, fontWeight = FontWeight.Bold) }
+                }
+            },
+            confirmButton = { TextButton(onClick = { completedDownload = null }) { Text("Not now") } },
+            containerColor = Color(0xFF242541), titleContentColor = palette.ink, textContentColor = palette.muted
+        )
+    }
 }
 
 @Composable
@@ -219,7 +327,7 @@ private fun ColumnScope.PlayerPage(
     var isSeeking by remember { mutableStateOf(false) }
     Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(5.dp))
-        Box(Modifier.fillMaxWidth().weight(1f, fill = false).aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(palette.colors)), contentAlignment = Alignment.Center) {
+        Box(Modifier.widthIn(max = 290.dp).fillMaxWidth().weight(1f, fill = false).aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(palette.colors)), contentAlignment = Alignment.Center) {
             if (song?.cover != null) Image(song.cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
             else Text("♫\nNo artwork", color = ink, fontSize = 25.sp, fontWeight = FontWeight.Bold)
         }
@@ -314,6 +422,65 @@ private fun ColumnScope.PlaylistPage(playlists: List<Playlist>, songs: List<Song
 }
 
 @Composable
+private fun ColumnScope.DownloadPage(
+    link: String, onLink: (String) -> Unit, downloading: Boolean, progress: Int, status: String,
+    folderName: String, downloads: List<Song>, onChooseFolder: () -> Unit, onDownload: () -> Unit, onPlay: (Song) -> Unit, palette: Palette
+) {
+    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
+        Text("YOUR MUSIC", color = palette.muted, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.8.sp)
+        Text("Download", color = palette.ink, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
+        Spacer(Modifier.height(17.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            listOf("▶  YouTube", "☁  SoundCloud").forEach { source ->
+                Surface(shape = RoundedCornerShape(14.dp), color = palette.accent.copy(alpha = if (source.startsWith("▶")) .30f else .14f)) {
+                    Text(source, Modifier.padding(horizontal = 13.dp, vertical = 9.dp), color = palette.ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+        Spacer(Modifier.height(18.dp))
+        Text("Music link", color = palette.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        OutlinedTextField(
+            value = link, onValueChange = onLink, modifier = Modifier.fillMaxWidth().padding(top = 7.dp),
+            placeholder = { Text("Paste a YouTube or SoundCloud link", color = palette.muted) },
+            singleLine = true, shape = RoundedCornerShape(15.dp),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = palette.accent, unfocusedBorderColor = palette.ink.copy(alpha = .22f),
+                focusedTextColor = palette.ink, unfocusedTextColor = palette.ink,
+                focusedContainerColor = Color.Black.copy(alpha = .12f), unfocusedContainerColor = Color.Black.copy(alpha = .12f)
+            )
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+            Surface(shape = RoundedCornerShape(11.dp), color = palette.accent.copy(alpha = .28f)) {
+                Text("♫  MP3", Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = palette.ink, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+            }
+            Text("  ·  Cover art embedded", color = palette.muted, fontSize = 12.sp)
+        }
+        Button(
+            onClick = onDownload, enabled = !downloading,
+            modifier = Modifier.fillMaxWidth().height(51.dp), shape = RoundedCornerShape(16.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.ink, disabledContainerColor = palette.accent.copy(alpha = .45f))
+        ) { Text(if (downloading) "Downloading $progress%" else "↓   Download track", fontWeight = FontWeight.ExtraBold, fontSize = 15.sp) }
+        Row(Modifier.fillMaxWidth().clickable(onClick = onChooseFolder).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("▱", color = palette.accent, fontSize = 19.sp)
+            Text("  Save to  ", color = palette.muted, fontSize = 12.sp)
+            Text(folderName, modifier = Modifier.weight(1f), color = palette.ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("›", color = palette.muted, fontSize = 21.sp)
+        }
+        if (status.isNotBlank()) {
+            Text(status, color = if (status.contains("failed", true) || status.contains("need", true) || status.contains("paste", true)) Color(0xFFFFB8C4) else palette.muted, fontSize = 12.sp)
+            if (downloading) Slider(progress / 100f, {}, modifier = Modifier.fillMaxWidth().height(24.dp), colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = palette.accent, activeTrackColor = palette.accent, inactiveTrackColor = palette.ink.copy(alpha = .18f)))
+        }
+        Spacer(Modifier.height(14.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Recent downloads", color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
+            Text("MP3", color = palette.muted, fontSize = 11.sp)
+        }
+        if (downloads.isEmpty()) Text("Your finished downloads will appear here and in Library.", Modifier.padding(top = 7.dp), color = palette.muted, fontSize = 12.sp)
+        else downloads.take(6).forEach { SongRow(it, palette.ink, palette.muted) { onPlay(it) } }
+    }
+}
+
+@Composable
 private fun SongRow(song: Song, ink: Color, muted: Color, onClick: () -> Unit) {
     Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
         Box(Modifier.size(42.dp).clip(RoundedCornerShape(9.dp)).background(ink.copy(alpha = .13f)), contentAlignment = Alignment.Center) {
@@ -337,6 +504,67 @@ private fun audioPermission(context: Context): Boolean {
     return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 }
 
+private fun audioWritePermission(context: Context): Boolean = Build.VERSION.SDK_INT >= 29 ||
+    ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+private fun isSupportedMediaUrl(value: String): Boolean = try {
+    val uri = Uri.parse(value)
+    val allowed = setOf("youtube.com", "www.youtube.com", "music.youtube.com", "m.youtube.com", "youtu.be", "soundcloud.com", "www.soundcloud.com", "on.soundcloud.com")
+    uri.scheme == "https" && uri.host?.lowercase(Locale.ROOT) in allowed
+} catch (_: Exception) { false }
+
+private fun saveDownloadedAudio(context: Context, file: File, treeUri: Uri?): Uri {
+    if (treeUri != null) {
+        val folder = DocumentFile.fromTreeUri(context, treeUri) ?: error("The selected folder is no longer available.")
+        val target = folder.createFile("audio/mpeg", file.name) ?: error("Could not create an MP3 in the selected folder.")
+        context.contentResolver.openOutputStream(target.uri, "w")?.use { output -> FileInputStream(file).use { it.copyTo(output) } }
+            ?: error("Could not write to the selected folder.")
+        return target.uri
+    }
+    if (Build.VERSION.SDK_INT >= 29) {
+        val values = ContentValues().apply {
+            put(MediaStore.Audio.Media.DISPLAY_NAME, file.name)
+            put(MediaStore.Audio.Media.TITLE, file.nameWithoutExtension)
+            put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+            put(MediaStore.Audio.Media.IS_MUSIC, 1)
+            put(MediaStore.Audio.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MUSIC}/Audio Player")
+            put(MediaStore.Audio.Media.IS_PENDING, 1)
+        }
+        val uri = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values) ?: error("Could not save the MP3 to Music.")
+        try {
+            context.contentResolver.openOutputStream(uri, "w")?.use { output -> FileInputStream(file).use { it.copyTo(output) } }
+                ?: error("Could not write the downloaded MP3.")
+            context.contentResolver.update(uri, ContentValues().apply { put(MediaStore.Audio.Media.IS_PENDING, 0) }, null, null)
+            return uri
+        } catch (error: Exception) {
+            context.contentResolver.delete(uri, null, null)
+            throw error
+        }
+    }
+    val folder = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC), "Audio Player")
+    if (!folder.exists() && !folder.mkdirs()) error("Could not create the Music/Audio Player folder.")
+    val target = File(folder, file.name)
+    FileInputStream(file).use { input -> FileOutputStream(target).use { output -> input.copyTo(output) } }
+    android.media.MediaScannerConnection.scanFile(context, arrayOf(target.absolutePath), arrayOf("audio/mpeg"), null)
+    return Uri.fromFile(target)
+}
+
+private data class AudioMetadata(val title: String, val artist: String, val album: String, val cover: Bitmap?)
+
+private fun readAudioMetadata(file: File): AudioMetadata {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(file.absolutePath)
+        val cover = retriever.embeddedPicture?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+        AudioMetadata(
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE).orEmpty().takeUnless { it.equals("<unknown>", true) }.orEmpty(),
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST).orEmpty().takeUnless { it.equals("<unknown>", true) }.orEmpty(),
+            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM).orEmpty().takeUnless { it.equals("<unknown>", true) }.orEmpty(),
+            cover
+        )
+    } finally { retriever.release() }
+}
+
 private suspend fun scanSongs(context: Context): List<Song> = withContext(Dispatchers.IO) {
     val collection = if (Build.VERSION.SDK_INT >= 29) MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL) else MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
     val folderColumn = if (Build.VERSION.SDK_INT >= 29) MediaStore.Audio.Media.RELATIVE_PATH else MediaStore.Audio.Media.DATA
@@ -355,7 +583,7 @@ private suspend fun scanSongs(context: Context): List<Song> = withContext(Dispat
             val uri = ContentUris.withAppendedId(collection, id)
             val albumId = cursor.getLong(albumIdCol)
             val artUri = Uri.parse("content://media/external/audio/albumart/$albumId")
-            val cover = if (albumId > 0) covers.getOrPut(albumId) { decodeCover(context, artUri) } else null
+            val cover = (if (albumId > 0) covers.getOrPut(albumId) { decodeCover(context, artUri) } else null) ?: decodeEmbeddedCover(context, ContentUris.withAppendedId(collection, id))
             val rawFolder = if (folderCol >= 0) cursor.getString(folderCol).orEmpty() else "Music"
             val folder = if (Build.VERSION.SDK_INT >= 29) rawFolder.trim('/').substringAfterLast('/') else rawFolder.substringBeforeLast('/', "Music")
             result += Song(uri, cursor.getString(titleCol).orEmpty().ifBlank { "Untitled" }, cursor.getString(artistCol).orEmpty().takeUnless { it.equals("<unknown>", true) }.orEmpty(), cursor.getString(albumCol).orEmpty().takeUnless { it.equals("<unknown>", true) }.orEmpty(), folder.ifBlank { "Music" }, cover)
@@ -372,6 +600,14 @@ private fun decodeCover(context: Context, uri: Uri): Bitmap? = try {
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, sample) }
     }
 } catch (_: Exception) { null }
+
+private fun decodeEmbeddedCover(context: Context, uri: Uri): Bitmap? {
+    val retriever = MediaMetadataRetriever()
+    return try {
+        retriever.setDataSource(context, uri)
+        retriever.embeddedPicture?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+    } catch (_: Exception) { null } finally { retriever.release() }
+}
 
 private fun time(ms: Long): String {
     val seconds = (ms.coerceAtLeast(0) / 1000).toInt()
