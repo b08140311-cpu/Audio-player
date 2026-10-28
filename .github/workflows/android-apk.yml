@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -27,4 +27,11 @@ jobs:
           name: audio-player-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
+      - name: Publish direct APK download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "android-${GITHUB_RUN_NUMBER}" app/build/outputs/apk/debug/app-debug.apk \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "Audio Player APK ${GITHUB_RUN_NUMBER}" \
+            --notes "Installable Android debug APK."
