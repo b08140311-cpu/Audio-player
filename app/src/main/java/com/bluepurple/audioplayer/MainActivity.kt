@@ -1,6 +1,7 @@
 package com.bluepurple.audioplayer
 
 import android.Manifest
+import android.app.Activity
 import android.content.ContentValues
 import android.content.ContentUris
 import android.content.Context
@@ -19,23 +20,24 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Checkbox
+import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
-import androidx.compose.material3.Surface
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.*
@@ -44,12 +46,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.*
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.view.WindowCompat
 import androidx.documentfile.provider.DocumentFile
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -67,23 +74,6 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.util.Locale
 
-private data class Song(
-    val uri: Uri, val title: String, val artist: String, val album: String,
-    val folder: String, val cover: Bitmap?
-)
-private data class Playlist(val name: String, val uris: List<String>)
-private data class Palette(val name: String, val colors: List<Color>, val ink: Color, val muted: Color, val accent: Color, val dark: Boolean)
-
-private val palettes = listOf(
-    Palette("Blue Purple", listOf(Color(0xFF5784C6), Color(0xFF717FC3), Color(0xFF9470B9)), Color.White, Color(0xFFE6E8FF), Color(0xFFB9A1FF), true),
-    Palette("Aurora", listOf(Color(0xFF070B12), Color(0xFF0B2528), Color(0xFF12364A)), Color(0xFFE8FFF7), Color(0xFFABD3CC), Color(0xFF53E2B5), true),
-    Palette("Violet Dusk", listOf(Color(0xFF100F19), Color(0xFF21182F), Color(0xFF302347)), Color(0xFFF7EFFF), Color(0xFFD2BFEC), Color(0xFFC994FF), true),
-    Palette("Ice Blue", listOf(Color(0xFFDCEEF4), Color(0xFFAFCDE0), Color(0xFF9BA9D8)), Color(0xFF20364B), Color(0xFF4C647B), Color(0xFF477FA5), false),
-    Palette("Sunset", listOf(Color(0xFFFFE1A4), Color(0xFFFFA980), Color(0xFFE7889D)), Color(0xFF542D22), Color(0xFF805044), Color(0xFFBD4D38), false),
-    Palette("Rose", listOf(Color(0xFFFFD2DF), Color(0xFFF3A8C9), Color(0xFFB9A0F1)), Color(0xFF4D2740), Color(0xFF77445F), Color(0xFFB94878), false),
-    Palette("Ocean", listOf(Color(0xFFC5F0EA), Color(0xFF90D1F2), Color(0xFFA8AEF3)), Color(0xFF18364E), Color(0xFF365E77), Color(0xFF247D9B), false)
-)
-
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -97,6 +87,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun AudioPlayerApp() {
     val context = LocalContext.current
+    val view = LocalView.current
     val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("audio-player", Context.MODE_PRIVATE) }
     val player = remember { ExoPlayer.Builder(context).build() }
@@ -104,17 +95,17 @@ private fun AudioPlayerApp() {
     var songs by remember { mutableStateOf<List<Song>>(emptyList()) }
     var queue by remember { mutableStateOf<List<Song>>(emptyList()) }
     var page by remember { mutableStateOf("Player") }
-    var groupKind by remember { mutableStateOf("Album") }
+    var libraryKind by remember { mutableStateOf("Songs") }
     var selectedFolders by remember { mutableStateOf(setOf<String>()) }
     var filter by remember { mutableStateOf("") }
     var coversOnly by remember { mutableStateOf(false) }
     var themeIndex by remember { mutableIntStateOf(prefs.getInt("theme", 0).coerceIn(palettes.indices)) }
     var themeOpen by remember { mutableStateOf(false) }
-    var mode by remember { mutableIntStateOf(1) }
+    var shuffle by remember { mutableStateOf(prefs.getBoolean("shuffle", true)) }
+    var repeatMode by remember { mutableIntStateOf(prefs.getInt("repeat", 0).coerceIn(0, 2)) }
     var position by remember { mutableLongStateOf(0L) }
     var duration by remember { mutableLongStateOf(0L) }
     var playing by remember { mutableStateOf(false) }
-    var volume by remember { mutableFloatStateOf(0.7f) }
     var playlists by remember { mutableStateOf(loadPlaylists(prefs)) }
     var playlistDialog by remember { mutableStateOf(false) }
     var playlistName by remember { mutableStateOf("") }
@@ -132,6 +123,15 @@ private fun AudioPlayerApp() {
     val palette = palettes[themeIndex]
     val permissionName = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_AUDIO else Manifest.permission.READ_EXTERNAL_STORAGE
 
+    SideEffect {
+        val window = (view.context as? Activity)?.window
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            controller.isAppearanceLightStatusBars = !palette.dark
+            controller.isAppearanceLightNavigationBars = !palette.dark
+        }
+    }
+
     val permissionRequest = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { permission = it }
     LaunchedEffect(permission) {
         if (permission) songs = withContext(Dispatchers.IO) { scanSongs(context) }
@@ -144,7 +144,10 @@ private fun AudioPlayerApp() {
             delay(300)
         }
     }
-    LaunchedEffect(volume) { player.volume = volume }
+    LaunchedEffect(shuffle, repeatMode) {
+        player.shuffleModeEnabled = shuffle
+        player.repeatMode = when (repeatMode) { 1 -> Player.REPEAT_MODE_ALL; 2 -> Player.REPEAT_MODE_ONE; else -> Player.REPEAT_MODE_OFF }
+    }
     DisposableEffect(player) { onDispose { player.release() } }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -214,14 +217,12 @@ private fun AudioPlayerApp() {
     }
     LaunchedEffect(downloadRetry) { if (downloadRetry > 0) { downloadRetry = 0; startDownload() } }
 
-    fun play(items: List<Song>, start: Int = 0) {
+    fun play(items: List<Song>, start: Int = 0, openPlayer: Boolean = true) {
         if (items.isEmpty()) return
         queue = items
-        player.shuffleModeEnabled = mode == 1
-        player.repeatMode = when (mode) { 2 -> Player.REPEAT_MODE_ALL; 3 -> Player.REPEAT_MODE_ONE; else -> Player.REPEAT_MODE_OFF }
         player.setMediaItems(items.map { MediaItem.fromUri(it.uri) }, start.coerceIn(items.indices), 0L)
         player.prepare(); player.play()
-        page = "Player"
+        if (openPlayer) page = "Player"
     }
 
     val filtered = remember(songs, filter, coversOnly) {
@@ -230,72 +231,78 @@ private fun AudioPlayerApp() {
     }
     val folders = remember(songs) { songs.groupBy { it.folder.ifBlank { "Music" } }.toSortedMap() }
     val track = queue.getOrNull(player.currentMediaItemIndex)
+    val togglePlay: () -> Unit = { if (player.isPlaying) player.pause() else if (player.mediaItemCount > 0) player.play() else play(filtered) }
 
-    Box(Modifier.fillMaxSize().background(Brush.linearGradient(palette.colors))) {
-        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 18.dp)) {
-            Row(Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+    Box(Modifier.fillMaxSize().background(palette.bg)) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding()) {
+            Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 10.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
-                    Text("Melody", color = palette.ink, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
-                    Text(if (permission) "${songs.size} tracks · ${page.lowercase()}" else "Your music, your way", color = palette.muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Melody", color = palette.ink, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                    Text(if (permission) "${songs.size} tracks · ${page.lowercase()}" else "Your music, your way", color = palette.muted, fontSize = 14.sp)
                 }
-                TextButton(onClick = { themeOpen = !themeOpen }, colors = ButtonDefaults.textButtonColors(contentColor = palette.ink)) { Text("◉", fontSize = 25.sp) }
-                TextButton(onClick = { if (permission) scope.launch { songs = scanSongs(context) } else permissionRequest.launch(permissionName) }, colors = ButtonDefaults.textButtonColors(contentColor = palette.ink)) { Text("Scan", fontWeight = FontWeight.Bold) }
+                RoundIconButton(IcTheme, "Choose theme", palette) { themeOpen = !themeOpen }
+                Spacer(Modifier.width(10.dp))
+                RoundIconButton(IcRefresh, "Scan for music", palette) {
+                    if (permission) scope.launch { songs = scanSongs(context) } else permissionRequest.launch(permissionName)
+                }
             }
-            if (themeOpen) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                palettes.forEachIndexed { index, item ->
-                    Box(Modifier.size(34.dp).clip(CircleShape).background(Brush.linearGradient(item.colors))
-                        .clickable { themeIndex = index; prefs.edit().putInt("theme", index).apply(); themeOpen = false }
-                        .then(if (index == themeIndex) Modifier.background(Color.Transparent, CircleShape) else Modifier), contentAlignment = Alignment.Center) {
-                        if (index == themeIndex) Text("✓", color = item.ink, fontSize = 17.sp, fontWeight = FontWeight.Black)
+            if (themeOpen) Column(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp)
+                    .clip(RoundedCornerShape(24.dp)).background(palette.s1)
+                    .border(1.dp, palette.border, RoundedCornerShape(24.dp)).padding(16.dp)
+            ) {
+                Text("Theme", color = palette.muted, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                Text(palette.name, color = palette.ink, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    palettes.forEachIndexed { index, item ->
+                        val selected = index == themeIndex
+                        Box(
+                            Modifier.size(44.dp).clip(CircleShape).background(item.bg)
+                                .border(if (selected) 3.dp else 1.dp, if (selected) palette.ink else palette.border, CircleShape)
+                                .clickable { themeIndex = index; prefs.edit().putInt("theme", index).apply(); themeOpen = false },
+                            contentAlignment = Alignment.Center
+                        ) { Box(Modifier.size(18.dp).clip(CircleShape).background(item.accent)) }
                     }
                 }
             }
-            if (!permission && page != "Download") {
-                Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                    Text("♫", color = palette.ink, fontSize = 54.sp)
-                    Text("Choose music access", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                    Text("Allow access to find songs on this device.", color = palette.muted, fontSize = 15.sp)
-                    Button(onClick = { permissionRequest.launch(permissionName) }, colors = ButtonDefaults.buttonColors(containerColor = palette.accent)) { Text("Allow", color = palette.ink, fontWeight = FontWeight.Bold) }
-                }
-            } else when (page) {
-                "Player" -> PlayerPage(track, queue, playing, position, duration, volume, mode, palette,
-                    onPlay = { if (player.isPlaying) player.pause() else if (player.mediaItemCount > 0) player.play() else play(filtered) },
-                    onPrevious = { if (player.mediaItemCount > 0) player.seekToPreviousMediaItem() },
-                    onNext = { if (player.mediaItemCount > 0) player.seekToNextMediaItem() },
-                    onSeek = { player.seekTo(it) }, onVolume = { volume = it; player.volume = it },
-                    onMode = { mode = (mode + 1) % 4; player.shuffleModeEnabled = mode == 1; player.repeatMode = when (mode) { 2 -> Player.REPEAT_MODE_ALL; 3 -> Player.REPEAT_MODE_ONE; else -> Player.REPEAT_MODE_OFF } },
-                    onFilter = { filter = it }, filter = filter, coversOnly = coversOnly, onCovers = { coversOnly = it }, songs = filtered,
-                    onSelectSong = { item -> play(filtered, filtered.indexOf(item).coerceAtLeast(0)) }, ink = palette.ink, muted = palette.muted, accent = palette.accent)
-                "Folders" -> FolderPage(folders, selectedFolders, palette,
-                    onToggle = { name -> selectedFolders = if (name in selectedFolders) selectedFolders - name else selectedFolders + name },
-                    onPlay = { names -> val items = filtered.filter { it.folder.ifBlank { "Music" } in names }; play(items) })
-                "Library" -> LibraryPage(filtered, groupKind, palette,
-                    onKind = { groupKind = it }, onPlay = { items -> play(items) })
-                "Download" -> DownloadPage(downloadUrl, { downloadUrl = it }, downloading, downloadProgress, downloadStatus, savedFolderName, downloadedSongs,
-                    onChooseFolder = { folderPicker.launch(null) }, onDownload = { startDownload() }, onPlay = { play(listOf(it)) }, palette = palette)
-                else -> PlaylistPage(playlists, filtered, expandedPlaylist, palette,
-                    onCreate = { playlistDialog = true },
-                    onPlay = { list -> play(list.uris.mapNotNull { uri -> songs.find { it.uri.toString() == uri } }) },
-                    onAdd = { list -> track?.let { song -> playlists = playlists.map { if (it.name == list.name && song.uri.toString() !in it.uris) it.copy(uris = it.uris + song.uri.toString()) else it }; savePlaylists(prefs, playlists) } },
-                    onRemove = { list, uri -> playlists = playlists.map { if (it.name == list.name) it.copy(uris = it.uris - uri) else it }; savePlaylists(prefs, playlists) },
-                    onExpand = { expandedPlaylist = if (expandedPlaylist == it) "" else it })
-            }
-            Row(Modifier.fillMaxWidth().padding(top = 7.dp, bottom = 7.dp).clip(RoundedCornerShape(20.dp)).background(Color.Black.copy(alpha = if (palette.dark) .28f else .13f)).padding(5.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-                listOf("Player" to "♫", "Folders" to "▤", "Library" to "◫", "Download" to "↓", "Playlists" to "☷").forEach { (name, icon) ->
-                    Column(Modifier.weight(1f).clip(RoundedCornerShape(15.dp)).background(if (page == name) palette.accent.copy(alpha = if (palette.dark) .35f else .25f) else Color.Transparent).clickable { page = name }.padding(vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-                        Text(icon, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                        Text(name, color = if (page == name) palette.ink else palette.muted, fontSize = 10.sp, fontWeight = if (page == name) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
-                    }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                if (!permission && page != "Download") {
+                    PermissionPrompt(palette) { permissionRequest.launch(permissionName) }
+                } else when (page) {
+                    "Player" -> PlayerPage(track, playing, position, duration, shuffle, repeatMode, palette,
+                        onPlay = togglePlay,
+                        onPrevious = { if (player.mediaItemCount > 0) player.seekToPreviousMediaItem() },
+                        onNext = { if (player.mediaItemCount > 0) player.seekToNextMediaItem() },
+                        onSeek = { player.seekTo(it) },
+                        onShuffle = { shuffle = !shuffle; prefs.edit().putBoolean("shuffle", shuffle).apply() },
+                        onRepeat = { repeatMode = (repeatMode + 1) % 3; prefs.edit().putInt("repeat", repeatMode).apply() })
+                    "Folders" -> FolderPage(folders, selectedFolders, palette,
+                        onToggle = { name -> selectedFolders = if (name in selectedFolders) selectedFolders - name else selectedFolders + name },
+                        onPlay = { names -> play(songs.filter { it.folder.ifBlank { "Music" } in names }) })
+                    "Library" -> LibraryPage(filtered, track, filter, { filter = it }, coversOnly, { coversOnly = it }, libraryKind, { libraryKind = it }, palette,
+                        onSong = { item -> play(filtered, filtered.indexOf(item).coerceAtLeast(0), openPlayer = false) },
+                        onPlay = { items -> play(items) })
+                    "Download" -> DownloadPage(downloadUrl, { downloadUrl = it }, downloading, downloadProgress, downloadStatus, savedFolderName, downloadedSongs,
+                        onChooseFolder = { folderPicker.launch(null) }, onDownload = { startDownload() }, onPlay = { play(listOf(it)) }, palette = palette)
+                    else -> PlaylistPage(playlists, songs, expandedPlaylist, palette,
+                        onCreate = { playlistDialog = true },
+                        onPlay = { list -> play(list.uris.mapNotNull { uri -> songs.find { it.uri.toString() == uri } }) },
+                        onAdd = { list -> track?.let { song -> playlists = playlists.map { if (it.name == list.name && song.uri.toString() !in it.uris) it.copy(uris = it.uris + song.uri.toString()) else it }; savePlaylists(prefs, playlists) } },
+                        onRemove = { list, uri -> playlists = playlists.map { if (it.name == list.name) it.copy(uris = it.uris - uri) else it }; savePlaylists(prefs, playlists) },
+                        onExpand = { expandedPlaylist = if (expandedPlaylist == it) "" else it })
                 }
             }
+            if (page != "Player" && track != null) MiniPlayer(track, playing, palette, onOpen = { page = "Player" }, onToggle = togglePlay)
+            NavBar(page, palette) { page = it }
         }
     }
     if (playlistDialog) AlertDialog(
         onDismissRequest = { playlistDialog = false; downloadedPlaylistUri = null },
         title = { Text("New playlist", fontWeight = FontWeight.Bold) },
-        text = { OutlinedTextField(playlistName, { playlistName = it }, singleLine = true, label = { Text("Name") }) },
-        confirmButton = { TextButton(onClick = { val name = playlistName.trim(); if (name.isNotEmpty() && playlists.none { it.name == name }) { val uri = downloadedPlaylistUri; val uris = uri?.let(::listOf) ?: emptyList(); playlists = playlists + Playlist(name, uris); savePlaylists(prefs, playlists) }; downloadedPlaylistUri = null; playlistName = ""; playlistDialog = false }) { Text("Create") } },
-        dismissButton = { TextButton(onClick = { playlistDialog = false; downloadedPlaylistUri = null }) { Text("Cancel") } }
+        text = { OutlinedTextField(playlistName, { playlistName = it }, singleLine = true, label = { Text("Name") }, colors = fieldColors(palette)) },
+        confirmButton = { TextButton(onClick = { val name = playlistName.trim(); if (name.isNotEmpty() && playlists.none { it.name == name }) { val uri = downloadedPlaylistUri; val uris = uri?.let(::listOf) ?: emptyList(); playlists = playlists + Playlist(name, uris); savePlaylists(prefs, playlists) }; downloadedPlaylistUri = null; playlistName = ""; playlistDialog = false }) { Text("Create", color = palette.accent, fontWeight = FontWeight.Bold) } },
+        dismissButton = { TextButton(onClick = { playlistDialog = false; downloadedPlaylistUri = null }) { Text("Cancel", color = palette.muted) } },
+        containerColor = palette.s2, titleContentColor = palette.ink, textContentColor = palette.muted
     )
     completedDownload?.let { song ->
         AlertDialog(
@@ -303,200 +310,423 @@ private fun AudioPlayerApp() {
             title = { Text("Add to a playlist?", fontWeight = FontWeight.Bold) },
             text = {
                 Column {
-                    Text(song.title, color = palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CoverTile(song, 44.dp, 12.dp, palette)
+                        Column(Modifier.padding(start = 12.dp)) {
+                            Text(song.title, color = palette.ink, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(song.artist.ifBlank { "Downloaded just now" }, color = palette.muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                    }
                     Spacer(Modifier.height(8.dp))
                     if (playlists.isEmpty()) Text("Create a playlist to add this song.", color = palette.muted)
                     playlists.forEach { list -> TextButton(onClick = { playlists = playlists.map { if (it.name == list.name && song.uri.toString() !in it.uris) it.copy(uris = it.uris + song.uri.toString()) else it }; savePlaylists(prefs, playlists); completedDownload = null }) { Text("＋  ${list.name}", color = palette.ink) } }
                     TextButton(onClick = { downloadedPlaylistUri = song.uri.toString(); playlistName = ""; playlistDialog = true; completedDownload = null }) { Text("Create playlist", color = palette.accent, fontWeight = FontWeight.Bold) }
                 }
             },
-            confirmButton = { TextButton(onClick = { completedDownload = null }) { Text("Not now") } },
-            containerColor = Color(0xFF242541), titleContentColor = palette.ink, textContentColor = palette.muted
+            confirmButton = { TextButton(onClick = { completedDownload = null }) { Text("Not now", color = palette.muted) } },
+            containerColor = palette.s2, titleContentColor = palette.ink, textContentColor = palette.muted
         )
     }
 }
 
 @Composable
-private fun ColumnScope.PlayerPage(
-    song: Song?, queue: List<Song>, playing: Boolean, position: Long, duration: Long, volume: Float, mode: Int, palette: Palette,
-    onPlay: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit, onSeek: (Long) -> Unit, onVolume: (Float) -> Unit,
-    onMode: () -> Unit, onFilter: (String) -> Unit, filter: String, coversOnly: Boolean, onCovers: (Boolean) -> Unit,
-    songs: List<Song>, onSelectSong: (Song) -> Unit, ink: Color, muted: Color, accent: Color
+private fun fieldColors(p: Palette) = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = p.accent, unfocusedBorderColor = p.border,
+    focusedTextColor = p.ink, unfocusedTextColor = p.ink,
+    focusedContainerColor = p.s1, unfocusedContainerColor = p.s1,
+    cursorColor = p.accent,
+    focusedPlaceholderColor = p.muted, unfocusedPlaceholderColor = p.muted,
+    focusedLabelColor = p.accent, unfocusedLabelColor = p.muted
+)
+
+@Composable
+private fun RoundIconButton(icon: ImageVector, label: String, palette: Palette, onClick: () -> Unit) {
+    Box(Modifier.size(44.dp).clip(CircleShape).background(palette.s1).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(icon, label, Modifier.size(22.dp), tint = palette.ink)
+    }
+}
+
+@Composable
+private fun IconBtn(icon: ImageVector, label: String, tint: Color, size: Dp = 24.dp, badge: String? = null, onClick: () -> Unit) {
+    Box(Modifier.size(48.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
+        Icon(icon, label, Modifier.size(size), tint = tint)
+        if (badge != null) Text(badge, color = tint, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun PillButton(label: String, icon: ImageVector, palette: Palette, onClick: () -> Unit) {
+    Row(
+        Modifier.height(44.dp).clip(RoundedCornerShape(22.dp)).background(palette.accent).clickable(onClick = onClick).padding(horizontal = 18.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Icon(icon, null, Modifier.size(16.dp), tint = palette.onAccent)
+        Text(label, color = palette.onAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
+private fun CoverTile(song: Song?, size: Dp, radius: Dp, palette: Palette) {
+    Box(Modifier.size(size).clip(RoundedCornerShape(radius)).background(palette.tint), contentAlignment = Alignment.Center) {
+        if (song?.cover != null) Image(song.cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        else Icon(IcNote, null, Modifier.size(size / 2), tint = palette.muted)
+    }
+}
+
+@Composable
+private fun PermissionPrompt(palette: Palette, onAllow: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(32.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Box(Modifier.size(88.dp).clip(CircleShape).background(palette.tint), contentAlignment = Alignment.Center) {
+            Icon(IcNote, null, Modifier.size(40.dp), tint = palette.ink)
+        }
+        Spacer(Modifier.height(20.dp))
+        Text("Choose music access", color = palette.ink, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(6.dp))
+        Text("Allow access to find songs on this device.", color = palette.muted, fontSize = 15.sp)
+        Spacer(Modifier.height(20.dp))
+        PillButton("Allow", IcCheck, palette, onAllow)
+    }
+}
+
+@Composable
+private fun NavBar(page: String, palette: Palette, onPage: (String) -> Unit) {
+    val tabs = listOf("Player" to IcNote, "Folders" to IcFolder, "Library" to IcGrid, "Download" to IcDownload, "Playlists" to IcList)
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp).height(64.dp)
+            .clip(RoundedCornerShape(32.dp)).background(palette.s1).padding(6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        tabs.forEach { (name, icon) ->
+            val selected = page == name
+            Column(
+                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(26.dp))
+                    .background(if (selected) palette.tint else Color.Transparent).clickable { onPage(name) },
+                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center
+            ) {
+                Icon(icon, null, Modifier.size(22.dp), tint = if (selected) palette.ink else palette.muted)
+                Text(name, color = if (selected) palette.ink else palette.muted, fontSize = 11.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium, maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiniPlayer(song: Song, playing: Boolean, palette: Palette, onOpen: () -> Unit, onToggle: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp).height(64.dp)
+            .clip(RoundedCornerShape(22.dp)).background(palette.s2).clickable(onClick = onOpen).padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CoverTile(song, 44.dp, 12.dp, palette)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(song.title, color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(song.artist.ifBlank { song.album }, color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Box(Modifier.size(42.dp).clip(CircleShape).background(palette.accent).clickable(onClick = onToggle), contentAlignment = Alignment.Center) {
+            Icon(if (playing) IcPause else IcPlay, if (playing) "Pause" else "Play", Modifier.size(20.dp), tint = palette.onAccent)
+        }
+    }
+}
+
+@Composable
+private fun PlayerPage(
+    song: Song?, playing: Boolean, position: Long, duration: Long, shuffle: Boolean, repeatMode: Int, palette: Palette,
+    onPlay: () -> Unit, onPrevious: () -> Unit, onNext: () -> Unit, onSeek: (Long) -> Unit, onShuffle: () -> Unit, onRepeat: () -> Unit
 ) {
     var seekDraft by remember { mutableFloatStateOf(0f) }
     var isSeeking by remember { mutableStateOf(false) }
-    Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Spacer(Modifier.height(5.dp))
-        Box(Modifier.widthIn(max = 290.dp).fillMaxWidth().weight(1f, fill = false).aspectRatio(1f).clip(RoundedCornerShape(28.dp)).background(Brush.linearGradient(palette.colors)), contentAlignment = Alignment.Center) {
-            if (song?.cover != null) Image(song.cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-            else Text("♫\nNo artwork", color = ink, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-        }
-        Spacer(Modifier.height(18.dp))
-        Text(song?.title ?: "No track", color = ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Text(song?.artist?.takeIf { it.isNotBlank() } ?: "", color = muted, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1)
-        Text(song?.album?.takeIf { it.isNotBlank() } ?: "", color = muted, fontSize = 14.sp, maxLines = 1)
-        Slider(value = if (isSeeking) seekDraft else if (duration > 0) position.toFloat().coerceIn(0f, duration.toFloat()) else 0f,
-            onValueChange = { seekDraft = it; isSeeking = true }, valueRange = 0f..duration.coerceAtLeast(1L).toFloat(), onValueChangeFinished = { onSeek(seekDraft.toLong()); isSeeking = false },
-            modifier = Modifier.fillMaxWidth().padding(top = 12.dp), colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent, inactiveTrackColor = ink.copy(alpha = .25f)))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(time(position), color = muted, fontSize = 12.sp); Text(time(duration), color = muted, fontSize = 12.sp) }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
-            IconText("|◀", ink, onPrevious)
-            Surface(Modifier.size(62.dp).clickable(onClick = onPlay), shape = CircleShape, color = accent) { Box(contentAlignment = Alignment.Center) { Text(if (playing) "Ⅱ" else "▶", color = palette.ink, fontSize = 26.sp, fontWeight = FontWeight.Black) } }
-            IconText("▶|", ink, onNext)
-            IconText(when (mode) { 2 -> "⟳"; 3 -> "↻¹"; else -> "↻" }, ink, onMode)
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("◖", color = muted, fontSize = 20.sp)
-            Slider(volume, onVolume, Modifier.weight(1f), colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = accent, activeTrackColor = accent))
-        }
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            OutlinedTextField(filter, onFilter, Modifier.weight(1f), singleLine = true, placeholder = { Text("Filter songs") })
-            Checkbox(coversOnly, onCovers)
-            Text("Cover", color = muted, fontSize = 13.sp)
-        }
-        LazyColumn(Modifier.fillMaxWidth().heightIn(max = 145.dp)) {
-            items(songs.take(100), key = { it.uri.toString() }) { item -> SongRow(item, ink, muted, onClick = { onSelectSong(item) }) }
-        }
-    }
-}
-
-@Composable
-private fun ColumnScope.FolderPage(folders: Map<String, List<Song>>, selected: Set<String>, palette: Palette, onToggle: (String) -> Unit, onPlay: (Set<String>) -> Unit) {
-    Column(Modifier.weight(1f).fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Folders", color = palette.ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-            Button(onClick = { onPlay(selected.ifEmpty { folders.keys }) }, colors = ButtonDefaults.buttonColors(containerColor = palette.accent)) { Text("▶ Play selected", color = palette.ink, fontWeight = FontWeight.Bold) }
-        }
-        LazyColumn { items(folders.toList(), key = { it.first }) { (name, tracks) ->
-            Row(Modifier.fillMaxWidth().clickable { onToggle(name) }.padding(vertical = 9.dp), verticalAlignment = Alignment.CenterVertically) {
-                Checkbox(name in selected, { onToggle(name) }); Text(name, Modifier.weight(1f), color = palette.ink, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text("${tracks.size}", color = palette.muted)
-                TextButton(onClick = { onPlay(setOf(name)) }) { Text("▶", color = palette.ink) }
+    Column(Modifier.fillMaxSize().padding(horizontal = 28.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(10.dp))
+        Box(
+            Modifier.widthIn(max = 340.dp).fillMaxWidth().weight(1f, fill = false).aspectRatio(1f)
+                .clip(RoundedCornerShape(38.dp)).background(Brush.linearGradient(listOf(palette.accent, palette.tint))),
+            contentAlignment = Alignment.Center
+        ) {
+            if (song?.cover != null) Image(song.cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            else Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(IcNote, null, Modifier.size(84.dp), tint = palette.onAccent.copy(alpha = .85f))
+                Text("No artwork", color = palette.onAccent.copy(alpha = .85f), fontSize = 16.sp, fontWeight = FontWeight.Bold)
             }
-        } }
-    }
-}
-
-@Composable
-private fun ColumnScope.LibraryPage(songs: List<Song>, kind: String, palette: Palette, onKind: (String) -> Unit, onPlay: (List<Song>) -> Unit) {
-    val groups = remember(songs, kind) { songs.groupBy { if (kind == "Album") it.album.ifBlank { "No album" } else it.artist.ifBlank { "No artist" } }.toSortedMap() }
-    Column(Modifier.weight(1f).fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Library", color = palette.ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-            TextButton(onClick = { onKind(if (kind == "Album") "Artist" else "Album") }) { Text(kind, color = palette.ink, fontWeight = FontWeight.Bold) }
         }
-        LazyColumn { items(groups.toList(), key = { it.first }) { (name, items) ->
-            Row(Modifier.fillMaxWidth().clickable { onPlay(items) }.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) { Text(name, color = palette.ink, fontWeight = FontWeight.Bold, fontSize = 17.sp); Text("${items.size} tracks", color = palette.muted, fontSize = 13.sp) }
-                TextButton(onClick = { onPlay(items) }) { Text("▶", color = palette.ink) }
+        Spacer(Modifier.height(22.dp))
+        Text(song?.title ?: "No track", color = palette.ink, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            listOfNotNull(song?.artist?.takeIf { it.isNotBlank() }, song?.album?.takeIf { it.isNotBlank() }).joinToString(" · "),
+            color = palette.muted, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis
+        )
+        Slider(
+            value = if (isSeeking) seekDraft else if (duration > 0) position.toFloat().coerceIn(0f, duration.toFloat()) else 0f,
+            onValueChange = { seekDraft = it; isSeeking = true },
+            valueRange = 0f..duration.coerceAtLeast(1L).toFloat(),
+            onValueChangeFinished = { onSeek(seekDraft.toLong()); isSeeking = false },
+            modifier = Modifier.fillMaxWidth().padding(top = 14.dp),
+            colors = SliderDefaults.colors(thumbColor = palette.ink, activeTrackColor = palette.accent, inactiveTrackColor = palette.track)
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(time(position), color = palette.muted, fontSize = 12.sp)
+            Text(time(duration), color = palette.muted, fontSize = 12.sp)
+        }
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            IconBtn(IcShuffle, "Shuffle", if (shuffle) palette.accent else palette.muted, onClick = onShuffle)
+            IconBtn(IcPrev, "Previous track", palette.ink, 28.dp, onClick = onPrevious)
+            Box(Modifier.size(72.dp).clip(CircleShape).background(palette.accent).clickable(onClick = onPlay), contentAlignment = Alignment.Center) {
+                Icon(if (playing) IcPause else IcPlay, if (playing) "Pause" else "Play", Modifier.size(30.dp), tint = palette.onAccent)
             }
-        } }
+            IconBtn(IcNext, "Next track", palette.ink, 28.dp, onClick = onNext)
+            IconBtn(IcRepeat, "Repeat", if (repeatMode > 0) palette.accent else palette.muted, badge = if (repeatMode == 2) "1" else null, onClick = onRepeat)
+        }
+        Spacer(Modifier.height(22.dp))
     }
 }
 
 @Composable
-private fun ColumnScope.PlaylistPage(playlists: List<Playlist>, songs: List<Song>, expanded: String, palette: Palette, onCreate: () -> Unit, onPlay: (Playlist) -> Unit, onAdd: (Playlist) -> Unit, onRemove: (Playlist, String) -> Unit, onExpand: (String) -> Unit) {
-    Column(Modifier.weight(1f).fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Playlists", color = palette.ink, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, modifier = Modifier.weight(1f))
-            Button(onClick = onCreate, colors = ButtonDefaults.buttonColors(containerColor = palette.accent)) { Text("Create", color = palette.ink, fontWeight = FontWeight.Bold) }
+private fun FolderPage(folders: Map<String, List<Song>>, selected: Set<String>, palette: Palette, onToggle: (String) -> Unit, onPlay: (Set<String>) -> Unit) {
+    val count = folders.filterKeys { it in selected }.values.sumOf { it.size }
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${selected.size} selected · $count songs", Modifier.weight(1f), color = palette.muted, fontSize = 14.sp)
+            PillButton("Play selected", IcPlay, palette) { onPlay(selected.ifEmpty { folders.keys }) }
         }
-        LazyColumn { items(playlists, key = { it.name }) { list ->
-            Column {
-                Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("${if (expanded == list.name) "⌄" else "›"}  ${list.name}", Modifier.weight(1f).clickable { onExpand(list.name) }, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    Text("${list.uris.size}", color = palette.muted)
-                    TextButton(onClick = { onAdd(list) }) { Text("+", color = palette.ink) }
-                    TextButton(onClick = { onPlay(list) }) { Text("▶", color = palette.ink) }
-                }
-                if (expanded == list.name) list.uris.forEach { uri ->
-                    val song = songs.find { it.uri.toString() == uri }
-                    if (song != null) Row(Modifier.fillMaxWidth().padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(song.title, Modifier.weight(1f), color = palette.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        TextButton(onClick = { onRemove(list, uri) }) { Text("×", color = palette.ink) }
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(folders.toList(), key = { it.first }) { (name, tracks) ->
+                val on = name in selected
+                Row(
+                    Modifier.fillMaxWidth().height(68.dp).clip(RoundedCornerShape(20.dp))
+                        .background(if (on) palette.s2 else palette.s1)
+                        .border(1.5.dp, if (on) palette.accent else Color.Transparent, RoundedCornerShape(20.dp))
+                        .clickable { onToggle(name) }.padding(horizontal = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(24.dp).clip(RoundedCornerShape(8.dp)).background(if (on) palette.accent else Color.Transparent)
+                            .then(if (on) Modifier else Modifier.border(2.dp, palette.muted, RoundedCornerShape(8.dp))),
+                        contentAlignment = Alignment.Center
+                    ) { if (on) Icon(IcCheck, null, Modifier.size(16.dp), tint = palette.onAccent) }
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(palette.tint), contentAlignment = Alignment.Center) {
+                        Icon(IcFolder, null, Modifier.size(20.dp), tint = palette.ink)
+                    }
+                    Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                        Text(name, color = palette.ink, fontSize = 16.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${tracks.size} songs", color = palette.muted, fontSize = 13.sp)
+                    }
+                    Box(Modifier.size(40.dp).clip(CircleShape).background(palette.tint).clickable { onPlay(setOf(name)) }, contentAlignment = Alignment.Center) {
+                        Icon(IcPlay, "Play $name", Modifier.size(18.dp), tint = palette.ink)
                     }
                 }
             }
-        } }
+        }
     }
 }
 
 @Composable
-private fun ColumnScope.DownloadPage(
-    link: String, onLink: (String) -> Unit, downloading: Boolean, progress: Int, status: String,
-    folderName: String, downloads: List<Song>, onChooseFolder: () -> Unit, onDownload: () -> Unit, onPlay: (Song) -> Unit, palette: Palette
+private fun LibraryPage(
+    songs: List<Song>, current: Song?, filter: String, onFilter: (String) -> Unit, coversOnly: Boolean, onCovers: (Boolean) -> Unit,
+    kind: String, onKind: (String) -> Unit, palette: Palette, onSong: (Song) -> Unit, onPlay: (List<Song>) -> Unit
 ) {
-    Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(bottom = 8.dp)) {
-        Text("YOUR MUSIC", color = palette.muted, fontSize = 11.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.8.sp)
-        Text("Download", color = palette.ink, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold)
-        Spacer(Modifier.height(17.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            listOf("▶  YouTube", "☁  SoundCloud").forEach { source ->
-                Surface(shape = RoundedCornerShape(14.dp), color = palette.accent.copy(alpha = if (source.startsWith("▶")) .30f else .14f)) {
-                    Text(source, Modifier.padding(horizontal = 13.dp, vertical = 9.dp), color = palette.ink, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+    val groups: Map<String, List<Song>> = remember(songs, kind) {
+        if (kind == "Songs") emptyMap()
+        else songs.groupBy { if (kind == "Albums") it.album.ifBlank { "No album" } else it.artist.ifBlank { "No artist" } }.toSortedMap()
+    }
+    Column(Modifier.fillMaxSize()) {
+        OutlinedTextField(
+            filter, onFilter, Modifier.fillMaxWidth().padding(horizontal = 24.dp), singleLine = true, shape = RoundedCornerShape(28.dp),
+            placeholder = { Text("Filter songs", color = palette.muted) },
+            leadingIcon = { Icon(IcSearch, null, Modifier.size(20.dp), tint = palette.muted) },
+            colors = fieldColors(palette)
+        )
+        Row(Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.clip(RoundedCornerShape(20.dp)).background(palette.s1).padding(3.dp)) {
+                listOf("Songs", "Albums", "Artists").forEach { name ->
+                    val selected = name == kind
+                    Box(
+                        Modifier.height(34.dp).clip(RoundedCornerShape(17.dp)).background(if (selected) palette.accent else Color.Transparent)
+                            .clickable { onKind(name) }.padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.Center
+                    ) { Text(name, color = if (selected) palette.onAccent else palette.muted, fontSize = 13.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium) }
+                }
+            }
+            Spacer(Modifier.weight(1f))
+            Row(
+                Modifier.height(36.dp).clip(RoundedCornerShape(18.dp))
+                    .background(if (coversOnly) palette.tint else Color.Transparent)
+                    .border(1.dp, if (coversOnly) palette.accent else palette.border, RoundedCornerShape(18.dp))
+                    .clickable { onCovers(!coversOnly) }.padding(horizontal = 14.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                if (coversOnly) Icon(IcCheck, null, Modifier.size(16.dp), tint = palette.ink)
+                Text("Covers", color = if (coversOnly) palette.ink else palette.muted, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+        }
+        if (songs.isEmpty()) Text("No songs match.", Modifier.padding(horizontal = 24.dp, vertical = 8.dp), color = palette.muted, fontSize = 14.sp)
+        LazyColumn(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 12.dp)) {
+            if (kind == "Songs") {
+                items(songs, key = { it.uri.toString() }) { item -> SongRow(item, item.uri == current?.uri, palette) { onSong(item) } }
+            } else {
+                items(groups.toList(), key = { it.first }) { (name, items) ->
+                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable { onPlay(items) }.padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        CoverTile(items.firstOrNull { it.cover != null } ?: items.firstOrNull(), 48.dp, 12.dp, palette)
+                        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+                            Text(name, color = palette.ink, fontWeight = FontWeight.Bold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${items.size} tracks", color = palette.muted, fontSize = 13.sp)
+                        }
+                        Icon(IcPlay, "Play $name", Modifier.size(18.dp), tint = palette.ink)
+                    }
                 }
             }
         }
-        Spacer(Modifier.height(18.dp))
-        Text("Music link", color = palette.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-        OutlinedTextField(
-            value = link, onValueChange = onLink, modifier = Modifier.fillMaxWidth().padding(top = 7.dp),
-            placeholder = { Text("Paste a YouTube or SoundCloud link", color = palette.muted) },
-            singleLine = true, shape = RoundedCornerShape(15.dp),
-            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = palette.accent, unfocusedBorderColor = palette.ink.copy(alpha = .22f),
-                focusedTextColor = palette.ink, unfocusedTextColor = palette.ink,
-                focusedContainerColor = Color.Black.copy(alpha = .12f), unfocusedContainerColor = Color.Black.copy(alpha = .12f)
-            )
-        )
-        Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-            Surface(shape = RoundedCornerShape(11.dp), color = palette.accent.copy(alpha = .28f)) {
-                Text("♫  MP3", Modifier.padding(horizontal = 12.dp, vertical = 8.dp), color = palette.ink, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+    }
+}
+
+@Composable
+private fun PlaylistPage(playlists: List<Playlist>, songs: List<Song>, expanded: String, palette: Palette, onCreate: () -> Unit, onPlay: (Playlist) -> Unit, onAdd: (Playlist) -> Unit, onRemove: (Playlist, String) -> Unit, onExpand: (String) -> Unit) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(Modifier.fillMaxWidth().padding(start = 8.dp, top = 6.dp, bottom = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${playlists.size} playlists", Modifier.weight(1f), color = palette.muted, fontSize = 14.sp)
+            PillButton("Create", IcPlus, palette, onCreate)
+        }
+        if (playlists.isEmpty()) Text("Create your first playlist to collect songs.", color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(horizontal = 8.dp))
+        LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            items(playlists, key = { it.name }) { list ->
+                val members = list.uris.mapNotNull { uri -> songs.find { it.uri.toString() == uri } }
+                val open = expanded == list.name
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(if (open) palette.s2 else palette.s1).padding(12.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Mosaic(members, palette)
+                        Column(Modifier.weight(1f).clickable { onExpand(list.name) }.padding(horizontal = 12.dp, vertical = 4.dp)) {
+                            Text(list.name, color = palette.ink, fontSize = 17.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text("${list.uris.size} songs", color = palette.muted, fontSize = 13.sp)
+                        }
+                        Box(Modifier.size(40.dp).clip(CircleShape).background(palette.tint).clickable { onAdd(list) }, contentAlignment = Alignment.Center) {
+                            Icon(IcPlus, "Add current song to ${list.name}", Modifier.size(20.dp), tint = palette.ink)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Box(Modifier.size(40.dp).clip(CircleShape).background(palette.accent).clickable { onPlay(list) }, contentAlignment = Alignment.Center) {
+                            Icon(IcPlay, "Play ${list.name}", Modifier.size(18.dp), tint = palette.onAccent)
+                        }
+                    }
+                    if (open) {
+                        Spacer(Modifier.height(8.dp))
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(palette.border))
+                        if (members.isEmpty()) Text("No songs yet. Play a song, then tap + to add it.", Modifier.padding(top = 10.dp), color = palette.muted, fontSize = 13.sp)
+                        members.forEach { song ->
+                            Row(Modifier.fillMaxWidth().height(48.dp), verticalAlignment = Alignment.CenterVertically) {
+                                CoverTile(song, 32.dp, 9.dp, palette)
+                                Text(song.title, Modifier.weight(1f).padding(horizontal = 12.dp), color = palette.ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Box(Modifier.size(36.dp).clip(CircleShape).clickable { onRemove(list, song.uri.toString()) }, contentAlignment = Alignment.Center) {
+                                    Icon(IcClose, "Remove ${song.title}", Modifier.size(18.dp), tint = palette.muted)
+                                }
+                            }
+                        }
+                    }
+                }
             }
-            Text("  ·  Cover art embedded", color = palette.muted, fontSize = 12.sp)
+        }
+    }
+}
+
+@Composable
+private fun Mosaic(members: List<Song>, palette: Palette) {
+    Column(Modifier.size(56.dp).clip(RoundedCornerShape(14.dp)).background(palette.tint), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        for (row in 0..1) {
+            Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                for (col in 0..1) {
+                    val cover = members.getOrNull(row * 2 + col)?.cover
+                    Box(Modifier.weight(1f).fillMaxHeight().background(palette.track)) {
+                        if (cover != null) Image(cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DownloadPage(
+    link: String, onLink: (String) -> Unit, downloading: Boolean, progress: Int, status: String,
+    folderName: String, downloads: List<Song>, onChooseFolder: () -> Unit, onDownload: () -> Unit, onPlay: (Song) -> Unit, palette: Palette
+) {
+    val errorColor = if (palette.dark) Color(0xFFFFB8C4) else Color(0xFFB3261E)
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 24.dp, end = 24.dp, top = 10.dp, bottom = 8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SourceChip("YouTube", IcPlay, true, palette)
+            SourceChip("SoundCloud", IcCloud, false, palette)
+        }
+        Text("Music link", color = palette.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 18.dp))
+        OutlinedTextField(
+            value = link, onValueChange = onLink, modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+            placeholder = { Text("Paste a YouTube or SoundCloud link", color = palette.muted) },
+            leadingIcon = { Icon(IcLink, null, Modifier.size(20.dp), tint = palette.muted) },
+            singleLine = true, shape = RoundedCornerShape(16.dp), colors = fieldColors(palette)
+        )
+        Row(Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.height(28.dp).clip(RoundedCornerShape(10.dp)).background(palette.tint).padding(horizontal = 12.dp), contentAlignment = Alignment.Center) {
+                Text("MP3", color = palette.ink, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+            }
+            Text("  Cover art embedded", color = palette.muted, fontSize = 13.sp)
         }
         Button(
             onClick = onDownload, enabled = !downloading,
-            modifier = Modifier.fillMaxWidth().height(51.dp), shape = RoundedCornerShape(16.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.ink, disabledContainerColor = palette.accent.copy(alpha = .45f))
-        ) { Text(if (downloading) "Downloading $progress%" else "↓   Download track", fontWeight = FontWeight.ExtraBold, fontSize = 15.sp) }
-        Row(Modifier.fillMaxWidth().clickable(onClick = onChooseFolder).padding(vertical = 13.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("▱", color = palette.accent, fontSize = 19.sp)
-            Text("  Save to  ", color = palette.muted, fontSize = 12.sp)
-            Text(folderName, modifier = Modifier.weight(1f), color = palette.ink, fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("›", color = palette.muted, fontSize = 21.sp)
+            modifier = Modifier.fillMaxWidth().height(52.dp), shape = RoundedCornerShape(18.dp),
+            colors = ButtonDefaults.buttonColors(containerColor = palette.accent, contentColor = palette.onAccent, disabledContainerColor = palette.accent.copy(alpha = .45f), disabledContentColor = palette.onAccent)
+        ) {
+            Icon(IcDownload, null, Modifier.size(20.dp))
+            Spacer(Modifier.width(10.dp))
+            Text(if (downloading) "Downloading $progress%" else "Download track", fontWeight = FontWeight.Bold, fontSize = 15.sp)
         }
-        if (status.isNotBlank()) {
-            Text(status, color = if (status.contains("failed", true) || status.contains("need", true) || status.contains("paste", true)) Color(0xFFFFB8C4) else palette.muted, fontSize = 12.sp)
-            if (downloading) Slider(progress / 100f, {}, modifier = Modifier.fillMaxWidth().height(24.dp), colors = androidx.compose.material3.SliderDefaults.colors(thumbColor = palette.accent, activeTrackColor = palette.accent, inactiveTrackColor = palette.ink.copy(alpha = .18f)))
+        Row(Modifier.fillMaxWidth().clickable(onClick = onChooseFolder).padding(vertical = 16.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(IcFolder, null, Modifier.size(20.dp), tint = palette.accent)
+            Text("  Save to  ", color = palette.muted, fontSize = 13.sp)
+            Text(folderName, modifier = Modifier.weight(1f), color = palette.ink, fontSize = 13.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Icon(IcChevron, null, Modifier.size(18.dp), tint = palette.muted)
         }
-        Spacer(Modifier.height(14.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Text("Recent downloads", color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.ExtraBold)
-            Text("MP3", color = palette.muted, fontSize = 11.sp)
+        if (status.isNotBlank() || downloading) Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(palette.s2).padding(horizontal = 16.dp, vertical = 14.dp)) {
+            val isError = status.contains("failed", true) || status.contains("need", true) || status.contains("paste", true)
+            Text(status, color = if (isError) errorColor else palette.ink, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            if (downloading) Box(Modifier.padding(top = 10.dp).fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)).background(palette.track)) {
+                Box(Modifier.fillMaxWidth(progress / 100f).fillMaxHeight().clip(RoundedCornerShape(3.dp)).background(palette.accent))
+            }
         }
-        if (downloads.isEmpty()) Text("Your finished downloads will appear here and in Library.", Modifier.padding(top = 7.dp), color = palette.muted, fontSize = 12.sp)
-        else downloads.take(6).forEach { SongRow(it, palette.ink, palette.muted) { onPlay(it) } }
+        Row(Modifier.fillMaxWidth().padding(top = 18.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text("Recent downloads", color = palette.ink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            Text("MP3", color = palette.muted, fontSize = 12.sp)
+        }
+        if (downloads.isEmpty()) Text("Your finished downloads will appear here and in Library.", Modifier.padding(top = 8.dp), color = palette.muted, fontSize = 13.sp)
+        else downloads.take(6).forEach { SongRow(it, false, palette) { onPlay(it) } }
     }
 }
 
 @Composable
-private fun SongRow(song: Song, ink: Color, muted: Color, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(Modifier.size(42.dp).clip(RoundedCornerShape(9.dp)).background(ink.copy(alpha = .13f)), contentAlignment = Alignment.Center) {
-            if (song.cover != null) Image(song.cover.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) else Text("♫", color = ink)
-        }
-        Column(Modifier.weight(1f).padding(start = 10.dp)) {
-            Text(song.title, color = ink, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text(song.artist.ifBlank { song.album }, color = muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Text("▶", color = ink, modifier = Modifier.padding(horizontal = 10.dp))
+private fun SourceChip(label: String, icon: ImageVector, active: Boolean, palette: Palette) {
+    Row(
+        Modifier.height(32.dp).clip(RoundedCornerShape(16.dp)).background(if (active) palette.tint else palette.s1).padding(horizontal = 14.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)
+    ) {
+        Icon(icon, null, Modifier.size(14.dp), tint = if (active) palette.ink else palette.muted)
+        Text(label, color = if (active) palette.ink else palette.muted, fontSize = 13.sp, fontWeight = if (active) FontWeight.Bold else FontWeight.Medium)
     }
 }
 
 @Composable
-private fun IconText(text: String, color: Color, action: () -> Unit) {
-    Text(text, Modifier.clip(CircleShape).clickable(onClick = action).padding(12.dp), color = color, fontSize = 21.sp, fontWeight = FontWeight.Bold)
+private fun SongRow(song: Song, current: Boolean, palette: Palette, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(if (current) palette.s2 else Color.Transparent)
+            .clickable(onClick = onClick).padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        CoverTile(song, 44.dp, 12.dp, palette)
+        Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
+            Text(song.title, color = if (current) palette.accent else palette.ink, fontSize = 15.sp, fontWeight = if (current) FontWeight.Bold else FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(song.artist.ifBlank { song.album }, color = palette.muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        if (current) Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.Bottom, modifier = Modifier.height(16.dp)) {
+            Box(Modifier.width(3.dp).height(10.dp).clip(RoundedCornerShape(2.dp)).background(palette.accent))
+            Box(Modifier.width(3.dp).height(16.dp).clip(RoundedCornerShape(2.dp)).background(palette.accent))
+            Box(Modifier.width(3.dp).height(7.dp).clip(RoundedCornerShape(2.dp)).background(palette.accent))
+        } else Icon(IcPlay, null, Modifier.size(16.dp), tint = palette.muted)
+    }
 }
 
 private fun audioPermission(context: Context): Boolean {
